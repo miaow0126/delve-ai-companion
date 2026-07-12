@@ -1,0 +1,11 @@
+services:
+  delve-mcp:
+    build: .
+    container_name: delve-mcp
+    restart: always
+    ports:
+      - "8900:8900"
+    volumes:
+      - /root/delve-mcp:/app
+    environment:
+      - DELVE_HTTP=8900
