@@ -204,18 +204,13 @@ body {
 .panel { flex: 1; overflow-y: auto; display: none; }
 .panel.active { display: block; }
 
-/* 手帐时间轴 */
-.journal-layout { display: flex; height: 100%; }
-.journal-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto; background: var(--surface); }
-.journal-item { padding: 14px 18px; border-bottom: 1px solid var(--border); cursor: pointer; }
-.journal-item:hover { background: var(--card-hover); }
-.journal-item.active { background: var(--card); border-left: 2px solid var(--accent); }
-.journal-item-title { font-size: 0.88rem; font-weight: 600; }
-.journal-item-meta { font-size: 0.68rem; color: var(--muted); margin-top: 4px; }
-.journal-detail { flex: 1; padding: 28px 32px; overflow-y: auto; }
-.journal-detail-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 8px; }
-.journal-detail-meta { font-size: 0.75rem; color: var(--muted); margin-bottom: 20px; display: flex; gap: 14px; }
-.journal-detail-body { font-size: 0.92rem; line-height: 2; white-space: pre-wrap; }
+/* 手帐流水账 */
+.journal-feed { max-width: 720px; margin: 0 auto; padding: 24px 28px 60px; }
+.journal-entry { padding: 18px 0; border-bottom: 1px solid var(--border); }
+.journal-entry:first-child { padding-top: 0; }
+.journal-entry-title { font-size: 1.02rem; font-weight: 700; margin-bottom: 6px; }
+.journal-entry-meta { font-size: 0.72rem; color: var(--muted); margin-bottom: 10px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.journal-entry-body { font-size: 0.88rem; line-height: 1.9; white-space: pre-wrap; color: var(--text); }
 .type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; background: var(--card); color: var(--accent); font-size: 0.68rem; }
 
 /* 藏品图鉴 */
@@ -263,7 +258,7 @@ body {
   <div class="tab" data-tab="titles" onclick="switchTab('titles')">🎖️ 称号簿</div>
 </div>
 <div class="main">
-  <div class="panel active" id="panel-journal"><div class="journal-layout" id="journal-layout"></div></div>
+  <div class="panel active" id="panel-journal"><div class="journal-feed" id="journal-feed"></div></div>
   <div class="panel" id="panel-museum"><div class="museum-body" id="museum-body"></div></div>
   <div class="panel" id="panel-titles"><div class="titles-body" id="titles-body"></div></div>
 </div>
@@ -280,7 +275,6 @@ function rarityColor(r) {
 }
 
 let journalData = [];
-let currentJournalId = null;
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
@@ -313,42 +307,23 @@ async function loadOverview() {
 async function loadJournal() {
   const r = await fetch('/api/journal');
   journalData = await r.json();
-  const layout = document.getElementById('journal-layout');
+  const feed = document.getElementById('journal-feed');
   if (!journalData.length) {
-    layout.innerHTML = '<div class="empty-state">还没有手帐记录<br>下矿走一趟就有了</div>';
+    feed.innerHTML = '<div class="empty-state">还没有手帐记录<br>下矿走一趟就有了</div>';
     return;
   }
-  layout.innerHTML = `
-    <div class="journal-list" id="journal-list"></div>
-    <div class="journal-detail" id="journal-detail"></div>
-  `;
-  const list = document.getElementById('journal-list');
-  list.innerHTML = journalData.map(p => `
-    <div class="journal-item" onclick="selectJournal('${esc(p.page_id)}')" id="jp_${esc(p.page_id)}">
-      <div class="journal-item-title">${esc(p.title)}</div>
-      <div class="journal-item-meta">${fmtDate(p.created_at)} · 第${p.turn||'?'}回合</div>
+  feed.innerHTML = journalData.map(p => `
+    <div class="journal-entry">
+      <div class="journal-entry-title">${esc(p.title)}</div>
+      <div class="journal-entry-meta">
+        <span class="type-badge">${esc(p.type||'')}</span>
+        <span>${fmtDate(p.created_at)}</span>
+        <span>📍 ${esc(p.layer||'')} · ${p.depth_m||0}m</span>
+        <span>第 ${p.turn||'?'} 回合</span>
+      </div>
+      <div class="journal-entry-body">${esc(p.body)}</div>
     </div>
   `).join('');
-  selectJournal(journalData[0].page_id);
-}
-
-function selectJournal(pageId) {
-  currentJournalId = pageId;
-  document.querySelectorAll('.journal-item').forEach(el => el.classList.remove('active'));
-  const el = document.getElementById('jp_' + pageId);
-  if (el) el.classList.add('active');
-  const p = journalData.find(x => x.page_id === pageId);
-  if (!p) return;
-  document.getElementById('journal-detail').innerHTML = `
-    <div class="journal-detail-title">${esc(p.title)}</div>
-    <div class="journal-detail-meta">
-      <span class="type-badge">${esc(p.type||'')}</span>
-      <span>${fmtDate(p.created_at)}</span>
-      <span>📍 ${esc(p.layer||'')} · ${p.depth_m||0}m</span>
-      <span>第 ${p.turn||'?'} 回合</span>
-    </div>
-    <div class="journal-detail-body">${esc(p.body)}</div>
-  `;
 }
 
 async function loadMuseum() {
