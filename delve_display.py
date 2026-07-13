@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+"""下矿 · 探险手帐 —— 只读展示台
+
+跟 delve_mcp.py 同一目录部署，直接 import delve 复用它自己的 cmd() 逻辑
+（status/museum/journal/titles 都是只读，不会碰存档），永远拿到游戏自己
+算好的最新数据（评级/图鉴进度这些是运行时算的，不在存档里，靠这个办法
+不用我们自己复刻一套规则表、也不会随着游戏更新过时）。
+
+环境变量：
+  DELVE_DISPLAY_PORT   展示台端口（默认 8901）
+"""
+
+import json
+import os
+import sys
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+PKG = os.path.dirname(os.path.abspath(__file__))
+if PKG not in sys.path:
+    sys.path.insert(0, PKG)
+
+import delve
+
+DISPLAY_PORT = int(os.environ.get("DELVE_DISPLAY_PORT", 8901))
+
+
+# ── 读游戏自己算好的数据 ──────────────────────────────────
+
+def safe_cmd(command):
+    try:
+        return delve.cmd(command)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def load_overview():
+    status = safe_cmd("status")
+    st = status.get("state", {}) or {}
+    rating = st.get("mining_rating", {}) or {}
+    current = rating.get("current_rating", {}) or {}
+    nxt = rating.get("next_rating") or {}
+    return {
+        "current_title": st.get("current_title"),
+        "owned_title_count": st.get("owned_title_count", 0),
+        "turn": st.get("turn", 0),
+        "trip": st.get("trip", 1),
+        "depth_m": st.get("depth_m", 0),
+        "max_depth_m": st.get("max_depth_m", 0),
+        "current_layer": st.get("current_layer"),
+        "coins": st.get("coins", 0),
+        "stamina": st.get("stamina"),
+        "journal_count": st.get("journal_count", 0),
+        "collection_total_value": st.get("collection_total_value", 0),
+        "rating_icon": current.get("icon", ""),
+        "rating_name": current.get("name", ""),
+        "rating_tone": current.get("tone", ""),
+        "next_rating_icon": nxt.get("icon", ""),
+        "next_rating_name": nxt.get("name", ""),
+        "remaining_to_next": rating.get("remaining_to_next"),
+        "next_min_value": nxt.get("min_value"),
+    }
+
+
+def load_journal(limit=50):
+    j = safe_cmd("journal")
+    pages = j.get("pages", []) or []
+    out = []
+    for p in pages[-limit:]:
+        out.append({
+            "page_id": p.get("page_id"),
+            "type": p.get("type"),
+            "title": p.get("title"),
+            "body": p.get("body"),
+            "layer": p.get("layer"),
+            "depth_m": p.get("depth_m"),
+            "turn": p.get("turn"),
+            "created_at": p.get("created_at"),
+        })
+    out.reverse()  # 最新的在前面
+    return out
+
+
+CATEGORY_META = {
+    "mineral": {"label": "矿物", "icon": "🪨"},
+    "gem": {"label": "宝石", "icon": "💎"},
+    "relic": {"label": "遗物", "icon": "🏺"},
+    "fossil": {"label": "化石", "icon": "🦴"},
+    "clue": {"label": "线索", "icon": "📜"},
+}
+RARITY_COLOR = {
+    "普通": "#5a6b8c", "common": "#5a6b8c",
+    "少见": "#3f8f6b", "uncommon": "#3f8f6b",
+    "稀有": "#3f7ba6", "rare": "#3f7ba6",
+    "史诗": "#8a5fc9", "epic": "#8a5fc9",
+    "传说": "#d4a24e", "legendary": "#d4a24e",
+}
+
+
+def load_museum():
+    m = safe_cmd("museum")
+    progress = (m.get("collection_progress") or {}).get("categories", [])
+    sections = m.get("sections") or {}
+    recent = m.get("recent_collection") or []
+    categories = []
+    for cat in progress:
+        cid = cat.get("category")
+        items = sections.get(cid, [])
+        categories.append({
+            "id": cid,
+            "label": cat.get("label") or CATEGORY_META.get(cid, {}).get("label", cid),
+            "icon": cat.get("icon") or CATEGORY_META.get(cid, {}).get("icon", "📦"),
+            "seen": cat.get("seen", 0),
+            "total": cat.get("total", 0),
+            "items": items,
+        })
+    recent_out = [{
+        "name": r.get("name"), "category": r.get("category"),
+        "rarity_zh": r.get("rarity_zh"), "value": r.get("value"),
+        "first_seen": r.get("first_seen"), "turn": r.get("turn"),
+    } for r in recent[-12:]]
+    recent_out.reverse()
+    return {"categories": categories, "recent": recent_out}
+
+
+def load_titles():
+    t = safe_cmd("titles")
+    return t
+
+
+# ── 展示页面 ──────────────────────────────────────────────
+
+PAGE = r"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>下矿 · 探险手帐</title>
+<style>
+:root {
+  --bg: #0a0e14;
+  --surface: #0f1420;
+  --card: #141a28;
+  --card-hover: #1a2136;
+  --border: #202940;
+  --text: #dde3f0;
+  --muted: #5a6b8c;
+  --accent: #d4a24e;
+  --accent-soft: #8a97b8;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'PingFang SC', 'Noto Sans SC', 'Helvetica Neue', sans-serif;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--surface);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.header h1 { font-size: 1.15rem; font-weight: 600; }
+.header .rating { color: var(--accent); font-size: 0.85rem; }
+.stats {
+  margin-left: auto;
+  display: flex;
+  gap: 16px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+.stats b { color: var(--text); font-weight: 600; }
+.progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.progress-bar-fill { height: 100%; background: var(--accent); }
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+.tab {
+  padding: 10px 20px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.main { flex: 1; overflow: hidden; display: flex; }
+.panel { flex: 1; overflow-y: auto; display: none; }
+.panel.active { display: block; }
+
+/* 手帐时间轴 */
+.journal-layout { display: flex; height: 100%; }
+.journal-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto; background: var(--surface); }
+.journal-item { padding: 14px 18px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.journal-item:hover { background: var(--card-hover); }
+.journal-item.active { background: var(--card); border-left: 2px solid var(--accent); }
+.journal-item-title { font-size: 0.88rem; font-weight: 600; }
+.journal-item-meta { font-size: 0.68rem; color: var(--muted); margin-top: 4px; }
+.journal-detail { flex: 1; padding: 28px 32px; overflow-y: auto; }
+.journal-detail-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 8px; }
+.journal-detail-meta { font-size: 0.75rem; color: var(--muted); margin-bottom: 20px; display: flex; gap: 14px; }
+.journal-detail-body { font-size: 0.92rem; line-height: 2; white-space: pre-wrap; }
+.type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; background: var(--card); color: var(--accent); font-size: 0.68rem; }
+
+/* 藏品图鉴 */
+.museum-body { padding: 24px 28px; }
+.cat-row { margin-bottom: 24px; }
+.cat-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.9rem; font-weight: 600; }
+.cat-head .count { margin-left: auto; color: var(--muted); font-size: 0.78rem; font-weight: 400; }
+.item-chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.item-chip {
+  padding: 6px 12px; border-radius: 6px; background: var(--card); border: 1px solid var(--border);
+  font-size: 0.78rem; display: flex; align-items: center; gap: 6px;
+}
+.item-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.empty-cat { color: var(--muted); font-size: 0.78rem; font-style: italic; }
+.recent-list { margin-top: 28px; }
+.recent-row { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.82rem; align-items: center; }
+.recent-row .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.recent-row .value { margin-left: auto; color: var(--accent); }
+
+/* 称号簿 */
+.titles-body { padding: 24px 28px; display: flex; flex-wrap: wrap; gap: 12px; }
+.title-badge {
+  padding: 10px 16px; border-radius: 8px; background: var(--card); border: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.title-badge.current { border-color: var(--accent); color: var(--accent); }
+
+.empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="header">
+  <span style="font-size:1.4rem">⛏️</span>
+  <h1>下矿 · 探险手帐</h1>
+  <span class="rating" id="rating-label">加载中…</span>
+  <div class="stats" id="stats"></div>
+</div>
+<div style="padding: 0 24px; background: var(--surface); border-bottom: 1px solid var(--border);">
+  <div class="progress-bar" id="rating-progress-bar" style="display:none"><div class="progress-bar-fill" id="rating-progress-fill"></div></div>
+  <div style="font-size:0.68rem;color:var(--muted);padding:4px 0 8px" id="rating-progress-text"></div>
+</div>
+<div class="tabs">
+  <div class="tab active" data-tab="journal" onclick="switchTab('journal')">📜 探险手帐</div>
+  <div class="tab" data-tab="museum" onclick="switchTab('museum')">📚 藏品图鉴</div>
+  <div class="tab" data-tab="titles" onclick="switchTab('titles')">🎖️ 称号簿</div>
+</div>
+<div class="main">
+  <div class="panel active" id="panel-journal"><div class="journal-layout" id="journal-layout"></div></div>
+  <div class="panel" id="panel-museum"><div class="museum-body" id="museum-body"></div></div>
+  <div class="panel" id="panel-titles"><div class="titles-body" id="titles-body"></div></div>
+</div>
+<script>
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z');
+  return d.toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+}
+function rarityColor(r) {
+  const map = {"普通":"#5a6b8c","少见":"#3f8f6b","稀有":"#3f7ba6","史诗":"#8a5fc9","传说":"#d4a24e"};
+  return map[r] || "#5a6b8c";
+}
+
+let journalData = [];
+let currentJournalId = null;
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
+async function loadOverview() {
+  const r = await fetch('/api/overview');
+  const o = await r.json();
+  document.getElementById('rating-label').textContent =
+    `${o.rating_icon||''} ${o.rating_name||''}${o.current_title ? ' ｜ 🎖️ ' + o.current_title : ''}`;
+  document.getElementById('stats').innerHTML = `
+    <span>⛏️ 深度 <b>${o.depth_m||0}m</b></span>
+    <span>🕯️ 灯火 <b>${esc(o.stamina||'')}</b></span>
+    <span>🪙 金币 <b>${o.coins||0}</b></span>
+    <span>💰 图鉴估值 <b>${o.collection_total_value||0}</b></span>
+    <span>📜 手帐 <b>${o.journal_count||0}</b> 页</span>
+  `;
+  if (o.next_rating_name && o.remaining_to_next != null && o.next_min_value) {
+    const cur = o.next_min_value - o.remaining_to_next;
+    const pct = Math.max(2, Math.min(100, Math.round(cur / o.next_min_value * 100)));
+    document.getElementById('rating-progress-bar').style.display = 'block';
+    document.getElementById('rating-progress-fill').style.width = pct + '%';
+    document.getElementById('rating-progress-text').textContent =
+      `距「${o.next_rating_icon||''} ${o.next_rating_name}」还差 ${o.remaining_to_next}`;
+  }
+}
+
+async function loadJournal() {
+  const r = await fetch('/api/journal');
+  journalData = await r.json();
+  const layout = document.getElementById('journal-layout');
+  if (!journalData.length) {
+    layout.innerHTML = '<div class="empty-state">还没有手帐记录<br>下矿走一趟就有了</div>';
+    return;
+  }
+  layout.innerHTML = `
+    <div class="journal-list" id="journal-list"></div>
+    <div class="journal-detail" id="journal-detail"></div>
+  `;
+  const list = document.getElementById('journal-list');
+  list.innerHTML = journalData.map(p => `
+    <div class="journal-item" onclick="selectJournal('${esc(p.page_id)}')" id="jp_${esc(p.page_id)}">
+      <div class="journal-item-title">${esc(p.title)}</div>
+      <div class="journal-item-meta">${fmtDate(p.created_at)} · 第${p.turn||'?'}回合</div>
+    </div>
+  `).join('');
+  selectJournal(journalData[0].page_id);
+}
+
+function selectJournal(pageId) {
+  currentJournalId = pageId;
+  document.querySelectorAll('.journal-item').forEach(el => el.classList.remove('active'));
+  const el = document.getElementById('jp_' + pageId);
+  if (el) el.classList.add('active');
+  const p = journalData.find(x => x.page_id === pageId);
+  if (!p) return;
+  document.getElementById('journal-detail').innerHTML = `
+    <div class="journal-detail-title">${esc(p.title)}</div>
+    <div class="journal-detail-meta">
+      <span class="type-badge">${esc(p.type||'')}</span>
+      <span>${fmtDate(p.created_at)}</span>
+      <span>📍 ${esc(p.layer||'')} · ${p.depth_m||0}m</span>
+      <span>第 ${p.turn||'?'} 回合</span>
+    </div>
+    <div class="journal-detail-body">${esc(p.body)}</div>
+  `;
+}
+
+async function loadMuseum() {
+  const r = await fetch('/api/museum');
+  const m = await r.json();
+  const body = document.getElementById('museum-body');
+  let html = '';
+  for (const cat of m.categories) {
+    html += `<div class="cat-row">
+      <div class="cat-head"><span>${cat.icon}</span><span>${esc(cat.label)}</span><span class="count">${cat.seen}/${cat.total}</span></div>
+      <div class="item-chip-row">`;
+    if (cat.items.length) {
+      for (const it of cat.items) {
+        html += `<div class="item-chip"><span class="dot" style="background:${rarityColor(it.rarity)}"></span>${esc(it.name)}${it.seen_count>1 ? ' ×'+it.seen_count : ''}</div>`;
+      }
+    } else {
+      html += `<div class="empty-cat">还没发现</div>`;
+    }
+    html += `</div></div>`;
+  }
+  if (m.recent.length) {
+    html += `<div class="recent-list"><div class="cat-head" style="margin-bottom:10px">🕒 最近入手</div>`;
+    for (const r2 of m.recent) {
+      html += `<div class="recent-row">
+        <span class="dot" style="background:${rarityColor(r2.rarity_zh)}"></span>
+        <span>${esc(r2.name)}</span>
+        <span style="color:var(--muted)">${esc(r2.rarity_zh||'')}</span>
+        <span class="value">+${r2.value||0}</span>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+  body.innerHTML = html || '<div class="empty-state">还没有藏品</div>';
+}
+
+async function loadTitles() {
+  const r = await fetch('/api/titles');
+  const t = await r.json();
+  const body = document.getElementById('titles-body');
+  const owned = t.owned_titles || t.titles || [];
+  if (!owned.length) {
+    body.innerHTML = '<div class="empty-state">还没有称号</div>';
+    return;
+  }
+  const current = t.current_title;
+  body.innerHTML = owned.map(name => {
+    const isCur = (typeof name === 'string' ? name : name.name) === current;
+    const label = typeof name === 'string' ? name : (name.name || JSON.stringify(name));
+    return `<div class="title-badge ${isCur ? 'current' : ''}">${isCur ? '👑 ' : ''}${esc(label)}</div>`;
+  }).join('');
+}
+
+loadOverview();
+loadJournal();
+loadMuseum();
+loadTitles();
+setInterval(() => { loadOverview(); loadJournal(); loadMuseum(); loadTitles(); }, 30000);
+</script>
+</body>
+</html>"""
+
+
+class DisplayHandler(BaseHTTPRequestHandler):
+    def _json(self, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/api/overview":
+            self._json(load_overview())
+        elif self.path == "/api/journal":
+            self._json(load_journal())
+        elif self.path == "/api/museum":
+            self._json(load_museum())
+        elif self.path == "/api/titles":
+            self._json(load_titles())
+        else:
+            body = PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+if __name__ == "__main__":
+    print(f"[*] 下矿展示台启动  端口:{DISPLAY_PORT}")
+    server = ThreadingHTTPServer(("0.0.0.0", DISPLAY_PORT), DisplayHandler)
+    server.serve_forever()

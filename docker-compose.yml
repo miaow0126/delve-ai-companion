@@ -9,3 +9,14 @@ services:
       - /root/delve-mcp:/app
     environment:
       - DELVE_HTTP=8900
+  delve-display:
+    build: .
+    container_name: delve-display
+    restart: always
+    ports:
+      - "8901:8901"
+    volumes:
+      - /root/delve-mcp:/app
+    environment:
+      - DELVE_DISPLAY_PORT=8901
+    command: ["python", "delve_display.py"]
