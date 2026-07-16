@@ -137,6 +137,7 @@ def load_museum():
             "name": it.get("name"),
             "rarity": delve.RARITY_ZH.get(it.get("rarity"), it.get("rarity")),
             "seen_count": seen_counts.get(iid, 1),
+            "description": it.get("description_seed") or "",
         })
     for cat_items in items_by_category.values():
         cat_items.sort(key=lambda x: -(x["seen_count"] or 0))
@@ -251,20 +252,40 @@ body {
 .journal-entry-meta { font-size: 0.72rem; color: var(--muted); margin-bottom: 10px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 .journal-entry-body { font-size: 0.88rem; line-height: 1.9; white-space: pre-wrap; color: var(--text); }
 .type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; background: var(--card); color: var(--accent); font-size: 0.68rem; }
-.load-more-btn { display: block; width: 100%; margin-top: 12px; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; font-size: 0.82rem; }
-.load-more-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* 分页控件（手帐用） */
+.pager { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 20px; flex-wrap: wrap; }
+.pager button {
+  min-width: 34px; height: 34px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--card); color: var(--text); cursor: pointer; font-size: 0.8rem;
+}
+.pager button:hover:not(:disabled) { background: var(--card-hover); }
+.pager button:disabled { opacity: 0.35; cursor: default; }
+.pager button.current { border-color: var(--accent); color: var(--accent); }
+.pager .ellipsis { color: var(--muted); padding: 0 4px; }
 
 /* 藏品图鉴 */
 .museum-body { padding: 24px 28px; }
-.cat-row { margin-bottom: 24px; }
-.cat-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.9rem; font-weight: 600; }
+.cat-row { margin-bottom: 28px; }
+.cat-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 0.9rem; font-weight: 600; }
 .cat-head .count { margin-left: auto; color: var(--muted); font-size: 0.78rem; font-weight: 400; }
-.item-chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
-.item-chip {
-  padding: 6px 12px; border-radius: 6px; background: var(--card); border: 1px solid var(--border);
-  font-size: 0.78rem; display: flex; align-items: center; gap: 6px;
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.item-card {
+  display: flex; flex-direction: column; height: 148px; padding: 12px 14px; border-radius: 8px;
+  background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--rarity-color, var(--border));
 }
-.item-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.item-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.item-card-name { font-size: 0.9rem; font-weight: 600; }
+.item-card-rarity {
+  flex-shrink: 0; font-size: 0.65rem; padding: 2px 7px; border-radius: 4px;
+  background: color-mix(in srgb, var(--rarity-color, var(--muted)) 22%, transparent);
+  color: var(--rarity-color, var(--muted));
+}
+.item-card-desc {
+  flex: 1; font-size: 0.74rem; line-height: 1.55; color: var(--accent-soft);
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+}
+.item-card-foot { margin-top: 8px; font-size: 0.7rem; color: var(--muted); }
 .empty-cat { color: var(--muted); font-size: 0.78rem; font-style: italic; }
 .recent-list { margin-top: 28px; }
 .recent-row { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.82rem; align-items: center; }
@@ -272,12 +293,18 @@ body {
 .recent-row .value { margin-left: auto; color: var(--accent); }
 
 /* 称号簿 */
-.titles-body { padding: 24px 28px; display: flex; flex-wrap: wrap; gap: 12px; }
-.title-badge {
-  padding: 10px 16px; border-radius: 8px; background: var(--card); border: 1px solid var(--border);
-  font-size: 0.85rem;
+.titles-body { padding: 24px 28px; }
+.title-card {
+  display: flex; flex-direction: column; height: 128px; padding: 12px 14px; border-radius: 8px;
+  background: var(--card); border: 1px solid var(--border);
 }
-.title-badge.current { border-color: var(--accent); color: var(--accent); }
+.title-card.current { border-color: var(--accent); }
+.title-card-name { font-size: 0.9rem; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.title-card.current .title-card-name { color: var(--accent); }
+.title-card-desc {
+  flex: 1; font-size: 0.74rem; line-height: 1.55; color: var(--accent-soft);
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+}
 
 .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 0.9rem; }
 </style>
@@ -346,7 +373,25 @@ async function loadOverview() {
 }
 
 let journalPage = 1;
-let journalHasMore = false;
+let journalTotalPages = 1;
+
+function buildPager(current, total, onGoto) {
+  if (total <= 1) return '';
+  const pages = new Set([1, total, current, current - 1, current + 1]);
+  const nums = [...pages].filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
+  let html = '<div class="pager">';
+  html += `<button data-goto="${current - 1}" ${current <= 1 ? 'disabled' : ''}>‹ 上一页</button>`;
+  let prev = 0;
+  for (const p of nums) {
+    if (prev && p - prev > 1) html += '<span class="ellipsis">…</span>';
+    html += `<button data-goto="${p}" class="${p === current ? 'current' : ''}">${p}</button>`;
+    prev = p;
+  }
+  html += `<button data-goto="${current + 1}" ${current >= total ? 'disabled' : ''}>下一页 ›</button>`;
+  html += `<span style="color:var(--muted);font-size:0.75rem;margin-left:6px">共 ${total} 页</span>`;
+  html += '</div>';
+  return html;
+}
 
 function renderJournalEntries() {
   const feed = document.getElementById('journal-feed');
@@ -365,34 +410,34 @@ function renderJournalEntries() {
       </div>
       <div class="journal-entry-body">${esc(p.body)}</div>
     </div>
-  `).join('') + (journalHasMore ? '<button class="load-more-btn" id="journal-more-btn">加载更多</button>' : '');
-  const btn = document.getElementById('journal-more-btn');
-  if (btn) btn.addEventListener('click', loadMoreJournal);
+  `).join('') + buildPager(journalPage, journalTotalPages);
+  feed.querySelectorAll('.pager button[data-goto]').forEach(btn => {
+    btn.addEventListener('click', () => gotoJournalPage(parseInt(btn.dataset.goto, 10)));
+  });
 }
 
-async function loadMoreJournal() {
-  const btn = document.getElementById('journal-more-btn');
-  if (btn) { btn.disabled = true; btn.textContent = '加载中…'; }
-  journalPage += 1;
-  const r = await fetch('/api/journal?page=' + journalPage);
+async function gotoJournalPage(page) {
+  if (page < 1 || page > journalTotalPages) return;
+  journalPage = page;
+  const r = await fetch('/api/journal?page=' + page);
   const data = await r.json();
   if (data.ok) {
-    journalData = journalData.concat(data.entries);
-    journalHasMore = data.has_more;
+    journalData = data.entries;
+    journalTotalPages = Math.max(1, Math.ceil(data.total / data.page_size));
   }
   renderJournalEntries();
+  document.getElementById('panel-journal').scrollTo(0, 0);
 }
 
 async function loadJournal() {
-  journalPage = 1;
-  const r = await fetch('/api/journal?page=1');
+  const r = await fetch('/api/journal?page=' + journalPage);
   const data = await r.json();
   if (!data.ok) {
     journalData = [];
-    journalHasMore = false;
+    journalTotalPages = 1;
   } else {
     journalData = data.entries;
-    journalHasMore = data.has_more;
+    journalTotalPages = Math.max(1, Math.ceil(data.total / data.page_size));
   }
   renderJournalEntries();
 }
@@ -405,10 +450,18 @@ async function loadMuseum() {
   for (const cat of m.categories) {
     html += `<div class="cat-row">
       <div class="cat-head"><span>${cat.icon}</span><span>${esc(cat.label)}</span><span class="count">${cat.seen}/${cat.total}</span></div>
-      <div class="item-chip-row">`;
+      <div class="card-grid">`;
     if (cat.items.length) {
       for (const it of cat.items) {
-        html += `<div class="item-chip"><span class="dot" style="background:${rarityColor(it.rarity)}"></span>${esc(it.name)}${it.seen_count>1 ? ' ×'+it.seen_count : ''}</div>`;
+        const color = rarityColor(it.rarity);
+        html += `<div class="item-card" style="--rarity-color:${color}">
+          <div class="item-card-head">
+            <span class="item-card-name">${esc(it.name)}</span>
+            <span class="item-card-rarity">${esc(it.rarity||'')}</span>
+          </div>
+          <div class="item-card-desc">${esc(it.description || '暂无记录')}</div>
+          <div class="item-card-foot">拾取 ×${it.seen_count||1}</div>
+        </div>`;
       }
     } else {
       html += `<div class="empty-cat">还没发现</div>`;
@@ -440,11 +493,16 @@ async function loadTitles() {
     return;
   }
   const current = t.current_title;
-  body.innerHTML = owned.map(name => {
-    const isCur = (typeof name === 'string' ? name : name.name) === current;
-    const label = typeof name === 'string' ? name : (name.name || JSON.stringify(name));
-    return `<div class="title-badge ${isCur ? 'current' : ''}">${isCur ? '👑 ' : ''}${esc(label)}</div>`;
-  }).join('');
+  body.innerHTML = '<div class="card-grid">' + owned.map(item => {
+    const isStr = typeof item === 'string';
+    const label = isStr ? item : (item.name || JSON.stringify(item));
+    const desc = isStr ? '' : (item.tone || '');
+    const isCur = label === current;
+    return `<div class="title-card ${isCur ? 'current' : ''}">
+      <div class="title-card-name">${isCur ? '👑' : ''} ${esc(label)}</div>
+      <div class="title-card-desc">${esc(desc || '暂无描述')}</div>
+    </div>`;
+  }).join('') + '</div>';
 }
 
 loadOverview();
