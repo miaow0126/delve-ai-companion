@@ -113,23 +113,44 @@ RARITY_COLOR = {
 }
 
 
+_ITEM_LOOKUP = {it["id"]: it for it in delve.ITEMS}
+
+
 def load_museum():
     raw = safe_cmd("museum")
     m = raw.get("museum") or raw
-    progress = (m.get("collection_progress") or {}).get("categories", [])
-    sections = m.get("sections") or {}
+    cp = m.get("collection_progress") or {}
+    progress = cp.get("categories", [])
+    seen_ids = cp.get("seen_item_ids", []) or []
+    seen_counts = cp.get("seen_counts", {}) or {}
     recent = m.get("recent_collection") or []
+
+    # sections 只是引擎最近12次拾取的滚动窗口，不是去重藏品清单；
+    # 真正完整的"每类发现了哪些藏品"要用 seen_item_ids 对照物品总表 ITEMS 自己拼。
+    items_by_category = {}
+    for iid in seen_ids:
+        it = _ITEM_LOOKUP.get(iid)
+        if not it:
+            continue  # decision_*/track:* 这类动态生成的id不在静态总表里，图鉴分母也不算它们
+        cid = it.get("category")
+        items_by_category.setdefault(cid, []).append({
+            "name": it.get("name"),
+            "rarity": delve.RARITY_ZH.get(it.get("rarity"), it.get("rarity")),
+            "seen_count": seen_counts.get(iid, 1),
+        })
+    for cat_items in items_by_category.values():
+        cat_items.sort(key=lambda x: -(x["seen_count"] or 0))
+
     categories = []
     for cat in progress:
         cid = cat.get("category")
-        items = sections.get(cid, [])
         categories.append({
             "id": cid,
             "label": cat.get("label") or CATEGORY_META.get(cid, {}).get("label", cid),
             "icon": cat.get("icon") or CATEGORY_META.get(cid, {}).get("icon", "📦"),
             "seen": cat.get("seen", 0),
             "total": cat.get("total", 0),
-            "items": items,
+            "items": items_by_category.get(cid, []),
         })
     recent_out = [{
         "name": r.get("name"), "category": r.get("category"),
