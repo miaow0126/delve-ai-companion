@@ -14,6 +14,7 @@ import json
 import os
 import sys
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs
 
 PKG = os.path.dirname(os.path.abspath(__file__))
 if PKG not in sys.path:
@@ -61,23 +62,39 @@ def load_overview():
     }
 
 
-def load_journal(limit=50):
-    j = safe_cmd("journal")
+JOURNAL_PAGE_SIZE = 20
+
+
+def load_journal(page=1, page_size=JOURNAL_PAGE_SIZE):
+    """journal_summary() 默认只给最近12页；这里直接调用底层函数（不走
+    cmd() 的文本指令接口）传一个足够大的 limit，拿到全部手帐页再自己分页。"""
+    try:
+        j = delve.journal_summary(limit=100000)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
     pages = j.get("pages", []) or []
-    out = []
-    for p in pages[-limit:]:
-        out.append({
-            "page_id": p.get("page_id"),
-            "type": p.get("type"),
-            "title": p.get("title"),
-            "body": p.get("body"),
-            "layer": p.get("layer"),
-            "depth_m": p.get("depth_m"),
-            "turn": p.get("turn"),
-            "created_at": p.get("created_at"),
-        })
-    out.reverse()  # 最新的在前面
-    return out
+    pages = list(reversed(pages))  # 最新的在前面
+    total = len(pages)
+    start = (page - 1) * page_size
+    slice_ = pages[start:start + page_size]
+    out = [{
+        "page_id": p.get("page_id"),
+        "type": p.get("type"),
+        "title": p.get("title"),
+        "body": p.get("body"),
+        "layer": p.get("layer"),
+        "depth_m": p.get("depth_m"),
+        "turn": p.get("turn"),
+        "created_at": p.get("created_at"),
+    } for p in slice_]
+    return {
+        "ok": True,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_more": start + page_size < total,
+        "entries": out,
+    }
 
 
 CATEGORY_META = {
@@ -97,7 +114,8 @@ RARITY_COLOR = {
 
 
 def load_museum():
-    m = safe_cmd("museum")
+    raw = safe_cmd("museum")
+    m = raw.get("museum") or raw
     progress = (m.get("collection_progress") or {}).get("categories", [])
     sections = m.get("sections") or {}
     recent = m.get("recent_collection") or []
@@ -212,6 +230,8 @@ body {
 .journal-entry-meta { font-size: 0.72rem; color: var(--muted); margin-bottom: 10px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 .journal-entry-body { font-size: 0.88rem; line-height: 1.9; white-space: pre-wrap; color: var(--text); }
 .type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; background: var(--card); color: var(--accent); font-size: 0.68rem; }
+.load-more-btn { display: block; width: 100%; margin-top: 12px; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; font-size: 0.82rem; }
+.load-more-btn:disabled { opacity: 0.5; cursor: default; }
 
 /* 藏品图鉴 */
 .museum-body { padding: 24px 28px; }
@@ -304,9 +324,10 @@ async function loadOverview() {
   }
 }
 
-async function loadJournal() {
-  const r = await fetch('/api/journal');
-  journalData = await r.json();
+let journalPage = 1;
+let journalHasMore = false;
+
+function renderJournalEntries() {
   const feed = document.getElementById('journal-feed');
   if (!journalData.length) {
     feed.innerHTML = '<div class="empty-state">还没有手帐记录<br>下矿走一趟就有了</div>';
@@ -323,7 +344,36 @@ async function loadJournal() {
       </div>
       <div class="journal-entry-body">${esc(p.body)}</div>
     </div>
-  `).join('');
+  `).join('') + (journalHasMore ? '<button class="load-more-btn" id="journal-more-btn">加载更多</button>' : '');
+  const btn = document.getElementById('journal-more-btn');
+  if (btn) btn.addEventListener('click', loadMoreJournal);
+}
+
+async function loadMoreJournal() {
+  const btn = document.getElementById('journal-more-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '加载中…'; }
+  journalPage += 1;
+  const r = await fetch('/api/journal?page=' + journalPage);
+  const data = await r.json();
+  if (data.ok) {
+    journalData = journalData.concat(data.entries);
+    journalHasMore = data.has_more;
+  }
+  renderJournalEntries();
+}
+
+async function loadJournal() {
+  journalPage = 1;
+  const r = await fetch('/api/journal?page=1');
+  const data = await r.json();
+  if (!data.ok) {
+    journalData = [];
+    journalHasMore = false;
+  } else {
+    journalData = data.entries;
+    journalHasMore = data.has_more;
+  }
+  renderJournalEntries();
 }
 
 async function loadMuseum() {
@@ -396,13 +446,19 @@ class DisplayHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/api/overview":
+        path, _, query = self.path.partition("?")
+        if path == "/api/overview":
             self._json(load_overview())
-        elif self.path == "/api/journal":
-            self._json(load_journal())
-        elif self.path == "/api/museum":
+        elif path == "/api/journal":
+            qs = parse_qs(query)
+            try:
+                page = int(qs.get("page", ["1"])[0])
+            except ValueError:
+                page = 1
+            self._json(load_journal(page=page))
+        elif path == "/api/museum":
             self._json(load_museum())
-        elif self.path == "/api/titles":
+        elif path == "/api/titles":
             self._json(load_titles())
         else:
             body = PAGE.encode()
