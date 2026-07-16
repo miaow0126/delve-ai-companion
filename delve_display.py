@@ -139,8 +139,9 @@ def load_museum():
             "seen_count": seen_counts.get(iid, 1),
             "description": it.get("description_seed") or "",
         })
+    rarity_rank = {"传说": 0, "史诗": 1, "稀有": 2, "少见": 3, "普通": 4}
     for cat_items in items_by_category.values():
-        cat_items.sort(key=lambda x: -(x["seen_count"] or 0))
+        cat_items.sort(key=lambda x: (rarity_rank.get(x["rarity"], 9), -(x["seen_count"] or 0)))
 
     categories = []
     for cat in progress:
